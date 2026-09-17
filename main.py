@@ -1,6 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from collections import defaultdict
+from typing import Optional
 import os
 
 # ============================================================
@@ -12,15 +14,13 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not SUPABASE_URL:
-    raise ValueError("SUPABASE_URL is missing from .env")
-
-if not SUPABASE_KEY:
-    raise ValueError("SUPABASE_KEY is missing from .env")
-
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError(
+        "SUPABASE_URL and SUPABASE_KEY must be present in .env"
+    )
 
 # ============================================================
-# SUPABASE CONNECTION
+# SUPABASE CLIENT
 # ============================================================
 
 supabase: Client = create_client(
@@ -28,111 +28,189 @@ supabase: Client = create_client(
     SUPABASE_KEY
 )
 
-
 # ============================================================
 # FASTAPI APP
 # ============================================================
 
 app = FastAPI(
-    title="Ward Information API",
-    description="Returns ward-wise civic issue information",
+    title="Civic Reporter Ranking API",
+    description="API for finding the top civic issue reporters by location",
     version="1.0.0"
 )
 
 
 # ============================================================
-# HEALTH CHECK
+# ROOT
 # ============================================================
 
 @app.get("/")
 def root():
     return {
-        "status": "success",
-        "message": "Ward Information API is running"
+        "message": "Civic Reporter Ranking API is running"
     }
 
 
 # ============================================================
-# GET WARD INFORMATION
+# TOP 3 REPORTERS
 # ============================================================
 
-@app.get("/ward-info/{city}")
-def get_ward_info(city: str):
-
+@app.get("/top-reporters")
+def get_top_reporters(
+    issue_location: str = Query(
+        ...,
+        description="Location of the civic issues, e.g. Bhubaneswar"
+    )
+):
     try:
 
-        # ----------------------------------------------------
-        # FETCH DATA FROM SUPABASE
-        # ----------------------------------------------------
+        # --------------------------------------------------------
+        # FETCH ALL ISSUES FOR THE LOCATION
+        # --------------------------------------------------------
 
         response = (
             supabase
-            .table("ward_issue_summary")
+            .table("issue_reports")
             .select(
-                "id,city,ward_number,issue_category,issue_count,created_at,updated_at"
+                """
+                report_id,
+                issue_id,
+                issue_description,
+                reported_by_name,
+                reported_by_phone,
+                reported_by_email,
+                reported_on,
+                issue_location,
+                latitude,
+                longitude,
+                evidence
+                """
             )
-            .eq("city", city)
-            .order("ward_number", desc=False)
+            .ilike("issue_location", issue_location.strip())
             .execute()
         )
 
-        data = response.data
+        issues = response.data or []
 
-        if not data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No ward information found for {city}"
-            )
+        # --------------------------------------------------------
+        # NO ISSUES
+        # --------------------------------------------------------
 
+        if not issues:
+            return {
+                "issue_location": issue_location,
+                "total_issues": 0,
+                "top_reporters": []
+            }
 
-        # ----------------------------------------------------
-        # GROUP DATA BY WARD
-        # ----------------------------------------------------
+        # --------------------------------------------------------
+        # GROUP REPORTS BY REPORTER
+        #
+        # Phone number is used as the primary identity.
+        # If phone is missing, email is used.
+        # If both are missing, name is used.
+        # --------------------------------------------------------
 
-        wards = {}
+        reporters = defaultdict(
+            lambda: {
+                "name": None,
+                "phone": None,
+                "email": None,
+                "report_count": 0,
+                "reports": []
+            }
+        )
 
-        for row in data:
+        for issue in issues:
 
-            ward_number = row["ward_number"]
+            name = issue.get("reported_by_name")
+            phone = issue.get("reported_by_phone")
+            email = issue.get("reported_by_email")
 
-            if ward_number not in wards:
+            # ----------------------------------------------------
+            # CREATE UNIQUE REPORTER KEY
+            # ----------------------------------------------------
 
-                wards[ward_number] = {
-                    "ward_number": ward_number,
-                    "issues": [],
-                    "total_issues": 0
-                }
+            if phone and phone.strip():
+                reporter_key = f"phone:{phone.strip()}"
 
-            issue_count = row.get("issue_count") or 0
+            elif email and email.strip():
+                reporter_key = f"email:{email.strip().lower()}"
 
-            wards[ward_number]["issues"].append({
-                "issue_category": row["issue_category"],
-                "issue_count": issue_count
+            elif name and name.strip():
+                reporter_key = f"name:{name.strip().lower()}"
+
+            else:
+                # Completely anonymous report
+                reporter_key = f"anonymous:{issue.get('report_id')}"
+
+            # ----------------------------------------------------
+            # STORE REPORTER INFORMATION
+            # ----------------------------------------------------
+
+            reporters[reporter_key]["name"] = name
+            reporters[reporter_key]["phone"] = phone
+            reporters[reporter_key]["email"] = email
+
+            reporters[reporter_key]["report_count"] += 1
+
+            # ----------------------------------------------------
+            # STORE ISSUE INFORMATION
+            # ----------------------------------------------------
+
+            reporters[reporter_key]["reports"].append({
+                "report_id": issue.get("report_id"),
+                "issue_id": issue.get("issue_id"),
+                "description": issue.get("issue_description"),
+                "reported_on": issue.get("reported_on"),
+                "location": issue.get("issue_location"),
+                "latitude": issue.get("latitude"),
+                "longitude": issue.get("longitude"),
+                "evidence": issue.get("evidence")
             })
 
-            wards[ward_number]["total_issues"] += issue_count
+        # --------------------------------------------------------
+        # SORT REPORTERS BY NUMBER OF REPORTS
+        # --------------------------------------------------------
 
+        sorted_reporters = sorted(
+            reporters.values(),
+            key=lambda x: x["report_count"],
+            reverse=True
+        )
 
-        # ----------------------------------------------------
-        # CONVERT DICT TO LIST
-        # ----------------------------------------------------
+        # --------------------------------------------------------
+        # TAKE TOP 3
+        # --------------------------------------------------------
 
-        ward_list = list(wards.values())
+        top_three = sorted_reporters[:3]
 
+        # --------------------------------------------------------
+        # BUILD RESPONSE
+        # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # RESPONSE
-        # ----------------------------------------------------
+        result = []
+
+        for index, reporter in enumerate(top_three, start=1):
+
+            result.append({
+                "rank": index,
+                "name": reporter["name"],
+                "phone": reporter["phone"],
+                "email": reporter["email"],
+                "report_count": reporter["report_count"],
+                "reports": reporter["reports"]
+            })
+
+        # --------------------------------------------------------
+        # FINAL RESPONSE
+        # --------------------------------------------------------
 
         return {
-            "city": city,
-            "total_wards": len(ward_list),
-            "wards": ward_list
+            "issue_location": issue_location,
+            "total_issues": len(issues),
+            "total_unique_reporters": len(reporters),
+            "top_reporters": result
         }
-
-
-    except HTTPException:
-        raise
 
     except Exception as e:
 
@@ -140,5 +218,16 @@ def get_ward_info(city: str):
 
         raise HTTPException(
             status_code=500,
-            detail="Failed to fetch ward information"
+            detail=f"Failed to fetch reporter information: {str(e)}"
         )
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy"
+    }
