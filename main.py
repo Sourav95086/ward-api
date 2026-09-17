@@ -1,13 +1,10 @@
 from fastapi import FastAPI, HTTPException, Query
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from collections import defaultdict
-from typing import Optional
 from pydantic import BaseModel
-
+from collections import defaultdict
 import os
 import smtplib
-import ssl
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -19,6 +16,11 @@ from email.mime.text import MIMEText
 
 load_dotenv()
 
+
+# ============================================================
+# ENVIRONMENT VARIABLES
+# ============================================================
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -26,16 +28,21 @@ EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "SUPABASE_URL and SUPABASE_KEY must be present in .env"
-    )
+# ============================================================
+# CHECK ENVIRONMENT VARIABLES
+# ============================================================
 
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL is missing from .env")
 
-if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD:
-    raise RuntimeError(
-        "EMAIL_ADDRESS and EMAIL_APP_PASSWORD must be present in .env"
-    )
+if not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_KEY is missing from .env")
+
+if not EMAIL_ADDRESS:
+    raise RuntimeError("EMAIL_ADDRESS is missing from .env")
+
+if not EMAIL_APP_PASSWORD:
+    raise RuntimeError("EMAIL_APP_PASSWORD is missing from .env")
 
 
 # ============================================================
@@ -53,9 +60,9 @@ supabase: Client = create_client(
 # ============================================================
 
 app = FastAPI(
-    title="Civic Reporter Ranking API",
-    description="API for finding top civic issue reporters and sending contest emails",
-    version="1.1.0"
+    title="SnapFix Civic Reporter API",
+    description="SnapFix civic reporter ranking and contest email API",
+    version="1.0.0"
 )
 
 
@@ -67,12 +74,25 @@ app = FastAPI(
 def root():
 
     return {
-        "message": "Civic Reporter Ranking API is running"
+        "message": "SnapFix Civic Reporter API is running",
+        "status": "online"
     }
 
 
 # ============================================================
-# TOP 3 REPORTERS
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy"
+    }
+
+
+# ============================================================
+# TOP REPORTERS
 # ============================================================
 
 @app.get("/top-reporters")
@@ -85,9 +105,19 @@ def get_top_reporters(
 
     try:
 
-        # --------------------------------------------------------
-        # FETCH ALL ISSUES FOR THE LOCATION
-        # --------------------------------------------------------
+        location = issue_location.strip()
+
+        if not location:
+
+            raise HTTPException(
+                status_code=400,
+                detail="issue_location cannot be empty"
+            )
+
+
+        # ====================================================
+        # FETCH REPORTS
+        # ====================================================
 
         response = (
             supabase
@@ -109,31 +139,32 @@ def get_top_reporters(
             )
             .ilike(
                 "issue_location",
-                issue_location.strip()
+                location
             )
             .execute()
         )
 
+
         issues = response.data or []
 
 
-        # --------------------------------------------------------
-        # NO ISSUES
-        # --------------------------------------------------------
+        # ====================================================
+        # NO REPORTS
+        # ====================================================
 
         if not issues:
 
             return {
-                "issue_location": issue_location,
+                "issue_location": location,
                 "total_issues": 0,
                 "total_unique_reporters": 0,
                 "top_reporters": []
             }
 
 
-        # --------------------------------------------------------
+        # ====================================================
         # GROUP REPORTS BY REPORTER
-        # --------------------------------------------------------
+        # ====================================================
 
         reporters = defaultdict(
             lambda: {
@@ -148,39 +179,31 @@ def get_top_reporters(
 
         for issue in issues:
 
-            name = issue.get(
-                "reported_by_name"
-            )
-
-            phone = issue.get(
-                "reported_by_phone"
-            )
-
-            email = issue.get(
-                "reported_by_email"
-            )
+            name = issue.get("reported_by_name")
+            phone = issue.get("reported_by_phone")
+            email = issue.get("reported_by_email")
 
 
-            # ----------------------------------------------------
-            # CREATE UNIQUE REPORTER KEY
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # IDENTIFY REPORTER
+            # ------------------------------------------------
 
-            if phone and phone.strip():
+            if phone and str(phone).strip():
 
                 reporter_key = (
-                    f"phone:{phone.strip()}"
+                    f"phone:{str(phone).strip()}"
                 )
 
-            elif email and email.strip():
+            elif email and str(email).strip():
 
                 reporter_key = (
-                    f"email:{email.strip().lower()}"
+                    f"email:{str(email).strip().lower()}"
                 )
 
-            elif name and name.strip():
+            elif name and str(name).strip():
 
                 reporter_key = (
-                    f"name:{name.strip().lower()}"
+                    f"name:{str(name).strip().lower()}"
                 )
 
             else:
@@ -190,9 +213,9 @@ def get_top_reporters(
                 )
 
 
-            # ----------------------------------------------------
-            # STORE REPORTER INFORMATION
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # SAVE REPORTER DETAILS
+            # ------------------------------------------------
 
             reporters[reporter_key]["name"] = name
 
@@ -203,9 +226,9 @@ def get_top_reporters(
             reporters[reporter_key]["report_count"] += 1
 
 
-            # ----------------------------------------------------
-            # STORE ISSUE INFORMATION
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # SAVE REPORT
+            # ------------------------------------------------
 
             reporters[reporter_key]["reports"].append({
 
@@ -240,12 +263,13 @@ def get_top_reporters(
                 "evidence": issue.get(
                     "evidence"
                 )
+
             })
 
 
-        # --------------------------------------------------------
+        # ====================================================
         # SORT REPORTERS
-        # --------------------------------------------------------
+        # ====================================================
 
         sorted_reporters = sorted(
             reporters.values(),
@@ -254,16 +278,12 @@ def get_top_reporters(
         )
 
 
-        # --------------------------------------------------------
-        # TOP 3
-        # --------------------------------------------------------
+        # ====================================================
+        # TAKE TOP 3
+        # ====================================================
 
         top_three = sorted_reporters[:3]
 
-
-        # --------------------------------------------------------
-        # BUILD RESPONSE
-        # --------------------------------------------------------
 
         result = []
 
@@ -290,16 +310,17 @@ def get_top_reporters(
                 "reports": reporter[
                     "reports"
                 ]
+
             })
 
 
-        # --------------------------------------------------------
-        # FINAL RESPONSE
-        # --------------------------------------------------------
+        # ====================================================
+        # RESPONSE
+        # ====================================================
 
         return {
 
-            "issue_location": issue_location,
+            "issue_location": location,
 
             "total_issues": len(issues),
 
@@ -308,27 +329,33 @@ def get_top_reporters(
             ),
 
             "top_reporters": result
+
         }
+
+
+    except HTTPException:
+
+        raise
 
 
     except Exception as e:
 
         print(
-            "ERROR:",
+            "TOP REPORTERS ERROR:",
             str(e)
         )
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Failed to fetch reporter information: "
-                + str(e)
+                "Failed to fetch reporter "
+                f"information: {str(e)}"
             )
         )
 
 
 # ============================================================
-# EMAIL REQUEST MODEL
+# WINNER EMAIL REQUEST MODEL
 # ============================================================
 
 class WinnerEmailRequest(BaseModel):
@@ -339,302 +366,22 @@ class WinnerEmailRequest(BaseModel):
 
 
 # ============================================================
-# GET REWARD BY RANK
+# REWARD MAPPING
 # ============================================================
 
 def get_reward(rank: int):
 
-    if rank == 1:
+    rewards = {
 
-        return "Amazon Gift Card"
+        1: "Amazon Gift Card",
 
-    elif rank == 2:
+        2: "Flipkart Gift Card",
 
-        return "Flipkart Gift Card"
+        3: "Meesho Gift Card"
 
-    elif rank == 3:
+    }
 
-        return "Meesho Gift Card"
-
-    else:
-
-        return None
-
-
-# ============================================================
-# GET MEDAL BY RANK
-# ============================================================
-
-def get_medal(rank: int):
-
-    if rank == 1:
-
-        return "🥇"
-
-    elif rank == 2:
-
-        return "🥈"
-
-    elif rank == 3:
-
-        return "🥉"
-
-    return "🏆"
-
-
-# ============================================================
-# CREATE EMAIL HTML
-# ============================================================
-
-def create_winner_email(
-    email: str,
-    rank: int,
-    reward: str
-):
-
-    medal = get_medal(rank)
-
-
-    html = f"""
-<!DOCTYPE html>
-
-<html>
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
-
-</head>
-
-
-<body style="
-    margin:0;
-    padding:0;
-    background-color:#07111f;
-    font-family:Arial,Helvetica,sans-serif;
-">
-
-
-<div style="
-    max-width:650px;
-    margin:30px auto;
-    background-color:#0d1b2a;
-    border-radius:18px;
-    overflow:hidden;
-    color:#ffffff;
-">
-
-
-    <!-- HEADER -->
-
-    <div style="
-        padding:35px 25px;
-        text-align:center;
-        background-color:#091625;
-        border-bottom:1px solid #20364a;
-    ">
-
-        <div style="
-            font-size:32px;
-            font-weight:bold;
-            color:#20d9ff;
-        ">
-            SNAPFIX
-        </div>
-
-
-        <div style="
-            margin-top:8px;
-            font-size:15px;
-            color:#9db2c5;
-            letter-spacing:1px;
-        ">
-            MONTHLY CONTEST
-        </div>
-
-    </div>
-
-
-    <!-- CONTENT -->
-
-    <div style="
-        padding:35px 30px;
-    ">
-
-
-        <div style="
-            text-align:center;
-            font-size:48px;
-        ">
-            {medal}
-        </div>
-
-
-        <h1 style="
-            text-align:center;
-            font-size:27px;
-            margin:15px 0;
-        ">
-            Congratulations!
-        </h1>
-
-
-        <p style="
-            text-align:center;
-            color:#b4c5d3;
-            line-height:1.7;
-            font-size:15px;
-        ">
-
-            You have been selected as one of the
-            Top 3 reporters in this month's
-            SnapFix Monthly Contest.
-
-        </p>
-
-
-        <!-- RANK -->
-
-        <div style="
-            margin-top:25px;
-            padding:25px;
-            text-align:center;
-            background-color:#112438;
-            border-radius:14px;
-        ">
-
-
-            <div style="
-                color:#8ea6ba;
-                font-size:13px;
-                letter-spacing:1px;
-            ">
-                YOUR RANK
-            </div>
-
-
-            <div style="
-                margin-top:8px;
-                color:#20d9ff;
-                font-size:38px;
-                font-weight:bold;
-            ">
-                #{rank}
-            </div>
-
-
-        </div>
-
-
-        <!-- REWARD -->
-
-        <div style="
-            margin-top:20px;
-            padding:25px;
-            text-align:center;
-            background-color:#102d3d;
-            border:1px solid #20d9ff;
-            border-radius:14px;
-        ">
-
-
-            <div style="
-                color:#9db2c5;
-                font-size:13px;
-                letter-spacing:1px;
-            ">
-                YOUR REWARD
-            </div>
-
-
-            <div style="
-                margin-top:10px;
-                color:#20d9ff;
-                font-size:22px;
-                font-weight:bold;
-            ">
-                {reward}
-            </div>
-
-
-        </div>
-
-
-        <!-- MESSAGE -->
-
-        <p style="
-            margin-top:30px;
-            color:#c3d0da;
-            font-size:15px;
-            line-height:1.8;
-        ">
-
-            Thank you for actively reporting civic
-            issues through SnapFix.
-
-        </p>
-
-
-        <p style="
-            color:#c3d0da;
-            font-size:15px;
-            line-height:1.8;
-        ">
-
-            Your contribution helps identify civic
-            problems and supports efforts to make
-            Bhubaneswar a better place.
-
-        </p>
-
-
-        <p style="
-            margin-top:30px;
-            text-align:center;
-            color:#20d9ff;
-            font-size:16px;
-            font-weight:bold;
-        ">
-
-            See you in next month's SnapFix contest!
-
-        </p>
-
-
-    </div>
-
-
-    <!-- FOOTER -->
-
-    <div style="
-        padding:22px;
-        text-align:center;
-        background-color:#091625;
-        color:#71869a;
-        font-size:12px;
-    ">
-
-        SnapFix Civic Reporting Platform
-
-        <br><br>
-
-        This is an automated email.
-
-    </div>
-
-
-</div>
-
-</body>
-
-</html>
-"""
-
-
-    return html
+    return rewards.get(rank)
 
 
 # ============================================================
@@ -646,119 +393,332 @@ def send_email(
     rank: int
 ):
 
-    # --------------------------------------------------------
+    # ========================================================
     # GET REWARD
-    # --------------------------------------------------------
+    # ========================================================
 
     reward = get_reward(rank)
-
 
     if reward is None:
 
         raise ValueError(
-            "Rank must be 1, 2 or 3."
+            "Invalid rank. Rank must be 1, 2 or 3."
         )
 
 
-    # --------------------------------------------------------
-    # CREATE EMAIL
-    # --------------------------------------------------------
+    # ========================================================
+    # SUBJECT
+    # ========================================================
 
-    html_content = create_winner_email(
-        recipient_email,
-        rank,
-        reward
+    subject = (
+        "Congratulations! You are a "
+        "SnapFix Monthly Contest Winner"
     )
 
 
-    # --------------------------------------------------------
-    # CREATE MIME MESSAGE
-    # --------------------------------------------------------
+    # ========================================================
+    # HTML EMAIL
+    # ========================================================
+
+    html = f"""
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<title>
+SnapFix Monthly Contest
+</title>
+
+</head>
+
+
+<body
+style="
+margin:0;
+padding:0;
+background:#07111f;
+font-family:Arial,Helvetica,sans-serif;
+">
+
+
+<div
+style="
+max-width:600px;
+margin:40px auto;
+background:#0d1b2a;
+border-radius:18px;
+overflow:hidden;
+border:1px solid #18324a;
+"
+>
+
+
+<!-- HEADER -->
+
+<div
+style="
+padding:30px;
+text-align:center;
+background:#081522;
+"
+>
+
+<h1
+style="
+margin:0;
+color:#00e5ff;
+font-size:30px;
+letter-spacing:2px;
+"
+>
+SNAPFIX
+</h1>
+
+
+<p
+style="
+color:#8fa7bd;
+margin-top:8px;
+font-size:14px;
+"
+>
+Monthly Civic Reporter Contest
+</p>
+
+</div>
+
+
+<!-- CONTENT -->
+
+<div
+style="
+padding:35px 30px;
+color:white;
+"
+>
+
+
+<h2
+style="
+color:#00e5ff;
+margin-top:0;
+"
+>
+Congratulations!
+</h2>
+
+
+<p
+style="
+color:#d7e3ee;
+font-size:16px;
+line-height:1.7;
+"
+>
+
+You have been selected as one of the
+top contributors in this month's
+SnapFix civic reporting contest.
+
+</p>
+
+
+<!-- WINNER INFORMATION -->
+
+<div
+style="
+background:#102438;
+border-radius:14px;
+padding:22px;
+margin:25px 0;
+"
+>
+
+
+<p
+style="
+margin:8px 0;
+color:#91a8bd;
+"
+>
+Your Rank
+</p>
+
+
+<p
+style="
+margin:0;
+font-size:32px;
+font-weight:bold;
+color:#00e5ff;
+"
+>
+#{rank}
+</p>
+
+
+<p
+style="
+margin-top:20px;
+margin-bottom:8px;
+color:#91a8bd;
+"
+>
+Your Reward
+</p>
+
+
+<p
+style="
+margin:0;
+font-size:20px;
+font-weight:bold;
+color:white;
+"
+>
+{reward}
+</p>
+
+
+</div>
+
+
+<p
+style="
+color:#d7e3ee;
+font-size:15px;
+line-height:1.7;
+"
+>
+
+Thank you for helping SnapFix identify
+and report important civic issues
+in your community.
+
+</p>
+
+
+<p
+style="
+color:#d7e3ee;
+font-size:15px;
+line-height:1.7;
+"
+>
+
+Your contribution helps authorities
+understand civic problems and
+prioritize improvements.
+
+</p>
+
+
+<!-- FOOTER -->
+
+<div
+style="
+margin-top:30px;
+padding-top:20px;
+border-top:1px solid #20384d;
+text-align:center;
+"
+>
+
+<p
+style="
+color:#00e5ff;
+font-weight:bold;
+"
+>
+
+See you in next month's
+SnapFix contest!
+
+</p>
+
+</div>
+
+
+</div>
+
+</div>
+
+</body>
+
+</html>
+"""
+
+
+    # ========================================================
+    # CREATE MESSAGE
+    # ========================================================
 
     message = MIMEMultipart(
         "alternative"
-    )
-
-
-    message["Subject"] = (
-        "🎉 SnapFix Monthly Contest "
-        "— Congratulations!"
     )
 
     message["From"] = EMAIL_ADDRESS
 
     message["To"] = recipient_email
 
-
-    # --------------------------------------------------------
-    # PLAIN TEXT VERSION
-    # --------------------------------------------------------
-
-    plain_text = f"""
-SnapFix Monthly Contest
-
-Congratulations!
-
-You have been selected as one of the
-Top 3 reporters in this month's
-SnapFix Monthly Contest.
-
-Rank: #{rank}
-
-Reward: {reward}
-
-Thank you for actively reporting civic
-issues through SnapFix.
-
-Your contribution helps identify civic
-problems and supports efforts to make
-Bhubaneswar a better place.
-
-See you in next month's SnapFix contest!
-
-SnapFix Civic Reporting Platform
-"""
-
-
-    # --------------------------------------------------------
-    # ATTACH BOTH VERSIONS
-    # --------------------------------------------------------
-
-    message.attach(
-        MIMEText(
-            plain_text,
-            "plain"
-        )
-    )
+    message["Subject"] = subject
 
 
     message.attach(
         MIMEText(
-            html_content,
+            html,
             "html"
         )
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # GMAIL SMTP
-    # --------------------------------------------------------
+    # ========================================================
 
-    context = ssl.create_default_context()
+    print()
+    print(
+        "========================================"
+    )
+    print(
+        "CONNECTING TO GMAIL SMTP"
+    )
+    print(
+        "========================================"
+    )
 
 
     with smtplib.SMTP(
         "smtp.gmail.com",
-        587
+        587,
+        timeout=30
     ) as server:
 
-        server.starttls(
-            context=context
+        server.ehlo()
+
+        print(
+            "Starting TLS..."
+        )
+
+        server.starttls()
+
+        server.ehlo()
+
+        print(
+            "Logging into Gmail..."
         )
 
         server.login(
             EMAIL_ADDRESS,
             EMAIL_APP_PASSWORD
+        )
+
+        print(
+            "Sending email..."
         )
 
         server.sendmail(
@@ -768,8 +728,35 @@ SnapFix Civic Reporting Platform
         )
 
 
+    print(
+        "EMAIL SENT SUCCESSFULLY"
+    )
+
+    print(
+        "Recipient:",
+        recipient_email
+    )
+
+    print(
+        "Rank:",
+        rank
+    )
+
+    print(
+        "Reward:",
+        reward
+    )
+
+    print(
+        "========================================"
+    )
+
+
+    return reward
+
+
 # ============================================================
-# SEND WINNER EMAIL ROUTE
+# SEND WINNER EMAIL ENDPOINT
 # ============================================================
 
 @app.post("/send-winner-email")
@@ -777,72 +764,113 @@ def send_winner_email(
     request: WinnerEmailRequest
 ):
 
-    # --------------------------------------------------------
-    # VALIDATE EMAIL
-    # --------------------------------------------------------
-
-    if not request.email:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Email is required."
-        )
-
-
-    # --------------------------------------------------------
-    # VALIDATE RANK
-    # --------------------------------------------------------
-
-    if request.rank not in [1, 2, 3]:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Rank must be 1, 2 or 3."
-        )
-
-
-    # --------------------------------------------------------
-    # GET REWARD
-    # --------------------------------------------------------
-
-    reward = get_reward(
-        request.rank
-    )
-
-
     try:
 
         # ----------------------------------------------------
-        # SEND EMAIL
+        # CHECK EMAIL
         # ----------------------------------------------------
 
-        send_email(
-            recipient_email=request.email,
+        email = request.email.strip()
+
+        if not email:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Email is required"
+            )
+
+
+        # ----------------------------------------------------
+        # CHECK RANK
+        # ----------------------------------------------------
+
+        if request.rank not in [1, 2, 3]:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Rank must be 1, 2 or 3"
+            )
+
+
+        print()
+        print(
+            "========================================"
+        )
+        print(
+            "WINNER EMAIL REQUEST"
+        )
+        print(
+            "========================================"
+        )
+
+        print(
+            "Email:",
+            email
+        )
+
+        print(
+            "Rank:",
+            request.rank
+        )
+
+
+        # ----------------------------------------------------
+        # SEND
+        # ----------------------------------------------------
+
+        reward = send_email(
+            recipient_email=email,
             rank=request.rank
         )
 
+
+        # ----------------------------------------------------
+        # RETURN RESPONSE
+        # ----------------------------------------------------
 
         return {
 
             "success": True,
 
-            "message": (
-                "Winner email sent successfully."
-            ),
+            "message":
+                "Winner email sent successfully.",
 
-            "email": request.email,
+            "email":
+                email,
 
-            "rank": request.rank,
+            "rank":
+                request.rank,
 
-            "reward": reward
+            "reward":
+                reward
+
         }
+
+
+    except HTTPException:
+
+        raise
 
 
     except Exception as e:
 
+        print()
         print(
-            "EMAIL ERROR:",
+            "========================================"
+        )
+        print(
+            "EMAIL ERROR"
+        )
+        print(
+            "========================================"
+        )
+
+        print(
             str(e)
+        )
+
+        print(
+            "========================================"
         )
 
 
@@ -850,18 +878,22 @@ def send_winner_email(
             status_code=500,
             detail=(
                 "Failed to send winner email: "
-                + str(e)
+                f"{str(e)}"
             )
         )
 
 
 # ============================================================
-# HEALTH CHECK
+# RUN APPLICATION DIRECTLY
 # ============================================================
 
-@app.get("/health")
-def health_check():
+if __name__ == "__main__":
 
-    return {
-        "status": "healthy"
-    }
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
