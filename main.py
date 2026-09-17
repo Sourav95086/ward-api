@@ -4,10 +4,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from collections import defaultdict
 import os
-import smtplib
-
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import resend
 
 
 # ============================================================
@@ -24,29 +21,29 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
-EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
 
 
 # ============================================================
-# CHECK ENVIRONMENT VARIABLES
+# VALIDATE ENVIRONMENT VARIABLES
 # ============================================================
 
 if not SUPABASE_URL:
-    raise RuntimeError("SUPABASE_URL is missing from .env")
+    raise RuntimeError("SUPABASE_URL is missing")
 
 if not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_KEY is missing from .env")
+    raise RuntimeError("SUPABASE_KEY is missing")
 
-if not EMAIL_ADDRESS:
-    raise RuntimeError("EMAIL_ADDRESS is missing from .env")
+if not RESEND_API_KEY:
+    raise RuntimeError("RESEND_API_KEY is missing")
 
-if not EMAIL_APP_PASSWORD:
-    raise RuntimeError("EMAIL_APP_PASSWORD is missing from .env")
+if not EMAIL_FROM:
+    raise RuntimeError("EMAIL_FROM is missing")
 
 
 # ============================================================
-# SUPABASE CLIENT
+# SUPABASE
 # ============================================================
 
 supabase: Client = create_client(
@@ -56,13 +53,20 @@ supabase: Client = create_client(
 
 
 # ============================================================
-# FASTAPI APP
+# RESEND
+# ============================================================
+
+resend.api_key = RESEND_API_KEY
+
+
+# ============================================================
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
     title="SnapFix Civic Reporter API",
     description="SnapFix civic reporter ranking and contest email API",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 
@@ -116,7 +120,7 @@ def get_top_reporters(
 
 
         # ====================================================
-        # FETCH REPORTS
+        # FETCH REPORTS FROM SUPABASE
         # ====================================================
 
         response = (
@@ -149,7 +153,7 @@ def get_top_reporters(
 
 
         # ====================================================
-        # NO REPORTS
+        # NO ISSUES
         # ====================================================
 
         if not issues:
@@ -163,7 +167,7 @@ def get_top_reporters(
 
 
         # ====================================================
-        # GROUP REPORTS BY REPORTER
+        # GROUP REPORTS
         # ====================================================
 
         reporters = defaultdict(
@@ -179,14 +183,22 @@ def get_top_reporters(
 
         for issue in issues:
 
-            name = issue.get("reported_by_name")
-            phone = issue.get("reported_by_phone")
-            email = issue.get("reported_by_email")
+            name = issue.get(
+                "reported_by_name"
+            )
+
+            phone = issue.get(
+                "reported_by_phone"
+            )
+
+            email = issue.get(
+                "reported_by_email"
+            )
 
 
-            # ------------------------------------------------
+            # =================================================
             # IDENTIFY REPORTER
-            # ------------------------------------------------
+            # =================================================
 
             if phone and str(phone).strip():
 
@@ -213,9 +225,9 @@ def get_top_reporters(
                 )
 
 
-            # ------------------------------------------------
-            # SAVE REPORTER DETAILS
-            # ------------------------------------------------
+            # =================================================
+            # UPDATE REPORTER
+            # =================================================
 
             reporters[reporter_key]["name"] = name
 
@@ -226,9 +238,9 @@ def get_top_reporters(
             reporters[reporter_key]["report_count"] += 1
 
 
-            # ------------------------------------------------
-            # SAVE REPORT
-            # ------------------------------------------------
+            # =================================================
+            # ADD REPORT
+            # =================================================
 
             reporters[reporter_key]["reports"].append({
 
@@ -268,7 +280,7 @@ def get_top_reporters(
 
 
         # ====================================================
-        # SORT REPORTERS
+        # SORT
         # ====================================================
 
         sorted_reporters = sorted(
@@ -279,7 +291,7 @@ def get_top_reporters(
 
 
         # ====================================================
-        # TAKE TOP 3
+        # TOP 3
         # ====================================================
 
         top_three = sorted_reporters[:3]
@@ -355,7 +367,7 @@ def get_top_reporters(
 
 
 # ============================================================
-# WINNER EMAIL REQUEST MODEL
+# WINNER EMAIL REQUEST
 # ============================================================
 
 class WinnerEmailRequest(BaseModel):
@@ -366,7 +378,7 @@ class WinnerEmailRequest(BaseModel):
 
 
 # ============================================================
-# REWARD MAPPING
+# REWARD
 # ============================================================
 
 def get_reward(rank: int):
@@ -385,42 +397,15 @@ def get_reward(rank: int):
 
 
 # ============================================================
-# SEND EMAIL
+# EMAIL HTML
 # ============================================================
 
-def send_email(
-    recipient_email: str,
-    rank: int
+def create_winner_email_html(
+    rank: int,
+    reward: str
 ):
 
-    # ========================================================
-    # GET REWARD
-    # ========================================================
-
-    reward = get_reward(rank)
-
-    if reward is None:
-
-        raise ValueError(
-            "Invalid rank. Rank must be 1, 2 or 3."
-        )
-
-
-    # ========================================================
-    # SUBJECT
-    # ========================================================
-
-    subject = (
-        "Congratulations! You are a "
-        "SnapFix Monthly Contest Winner"
-    )
-
-
-    # ========================================================
-    # HTML EMAIL
-    # ========================================================
-
-    html = f"""
+    return f"""
 <!DOCTYPE html>
 
 <html>
@@ -442,7 +427,8 @@ margin:0;
 padding:0;
 background:#07111f;
 font-family:Arial,Helvetica,sans-serif;
-">
+"
+>
 
 
 <div
@@ -508,7 +494,7 @@ color:#00e5ff;
 margin-top:0;
 "
 >
-Congratulations!
+🎉 Congratulations!
 </h2>
 
 
@@ -527,7 +513,7 @@ SnapFix civic reporting contest.
 </p>
 
 
-<!-- WINNER INFORMATION -->
+<!-- RANK CARD -->
 
 <div
 style="
@@ -653,83 +639,63 @@ SnapFix contest!
 """
 
 
+# ============================================================
+# SEND EMAIL THROUGH RESEND
+# ============================================================
+
+def send_winner_email(
+    recipient_email: str,
+    rank: int
+):
+
     # ========================================================
-    # CREATE MESSAGE
+    # VALIDATE RANK
     # ========================================================
 
-    message = MIMEMultipart(
-        "alternative"
-    )
+    reward = get_reward(rank)
 
-    message["From"] = EMAIL_ADDRESS
+    if reward is None:
 
-    message["To"] = recipient_email
-
-    message["Subject"] = subject
-
-
-    message.attach(
-        MIMEText(
-            html,
-            "html"
+        raise ValueError(
+            "Rank must be 1, 2 or 3"
         )
+
+
+    # ========================================================
+    # CREATE HTML
+    # ========================================================
+
+    html = create_winner_email_html(
+        rank=rank,
+        reward=reward
     )
 
 
     # ========================================================
-    # GMAIL SMTP
+    # EMAIL SUBJECT
+    # ========================================================
+
+    subject = (
+        "🎉 Congratulations! "
+        "You are a SnapFix Monthly Contest Winner"
+    )
+
+
+    # ========================================================
+    # SEND USING RESEND
     # ========================================================
 
     print()
     print(
         "========================================"
     )
+
     print(
-        "CONNECTING TO GMAIL SMTP"
+        "SENDING WINNER EMAIL"
     )
+
     print(
         "========================================"
-    )
-
-
-    with smtplib.SMTP(
-        "smtp.gmail.com",
-        587,
-        timeout=30
-    ) as server:
-
-        server.ehlo()
-
-        print(
-            "Starting TLS..."
-        )
-
-        server.starttls()
-
-        server.ehlo()
-
-        print(
-            "Logging into Gmail..."
-        )
-
-        server.login(
-            EMAIL_ADDRESS,
-            EMAIL_APP_PASSWORD
-        )
-
-        print(
-            "Sending email..."
-        )
-
-        server.sendmail(
-            EMAIL_ADDRESS,
-            recipient_email,
-            message.as_string()
-        )
-
-
-    print(
-        "EMAIL SENT SUCCESSFULLY"
     )
 
     print(
@@ -747,28 +713,96 @@ SnapFix contest!
         reward
     )
 
+
+    params = {
+
+        "from": EMAIL_FROM,
+
+        "to": [
+            recipient_email
+        ],
+
+        "subject": subject,
+
+        "html": html
+
+    }
+
+
+    try:
+
+        response = resend.Emails.send(
+            params
+        )
+
+    except Exception as e:
+
+        print(
+            "RESEND ERROR:",
+            str(e)
+        )
+
+        raise
+
+
+    print(
+        "RESEND RESPONSE:",
+        response
+    )
+
+    print(
+        "EMAIL SENT SUCCESSFULLY"
+    )
+
     print(
         "========================================"
     )
 
 
-    return reward
+    # ========================================================
+    # GET EMAIL ID
+    # ========================================================
+
+    email_id = None
+
+    if isinstance(response, dict):
+
+        email_id = response.get(
+            "id"
+        )
+
+    else:
+
+        email_id = getattr(
+            response,
+            "id",
+            None
+        )
+
+
+    return {
+
+        "reward": reward,
+
+        "email_id": email_id
+
+    }
 
 
 # ============================================================
-# SEND WINNER EMAIL ENDPOINT
+# SEND WINNER EMAIL API
 # ============================================================
 
 @app.post("/send-winner-email")
-def send_winner_email(
+def send_winner_email_api(
     request: WinnerEmailRequest
 ):
 
     try:
 
-        # ----------------------------------------------------
-        # CHECK EMAIL
-        # ----------------------------------------------------
+        # ====================================================
+        # VALIDATE EMAIL
+        # ====================================================
 
         email = request.email.strip()
 
@@ -780,9 +814,9 @@ def send_winner_email(
             )
 
 
-        # ----------------------------------------------------
-        # CHECK RANK
-        # ----------------------------------------------------
+        # ====================================================
+        # VALIDATE RANK
+        # ====================================================
 
         if request.rank not in [1, 2, 3]:
 
@@ -792,41 +826,19 @@ def send_winner_email(
             )
 
 
-        print()
-        print(
-            "========================================"
-        )
-        print(
-            "WINNER EMAIL REQUEST"
-        )
-        print(
-            "========================================"
-        )
-
-        print(
-            "Email:",
-            email
-        )
-
-        print(
-            "Rank:",
-            request.rank
-        )
-
-
-        # ----------------------------------------------------
+        # ====================================================
         # SEND
-        # ----------------------------------------------------
+        # ====================================================
 
-        reward = send_email(
+        result = send_winner_email(
             recipient_email=email,
             rank=request.rank
         )
 
 
-        # ----------------------------------------------------
-        # RETURN RESPONSE
-        # ----------------------------------------------------
+        # ====================================================
+        # RESPONSE
+        # ====================================================
 
         return {
 
@@ -842,7 +854,10 @@ def send_winner_email(
                 request.rank,
 
             "reward":
-                reward
+                result["reward"],
+
+            "email_id":
+                result["email_id"]
 
         }
 
@@ -858,9 +873,11 @@ def send_winner_email(
         print(
             "========================================"
         )
+
         print(
-            "EMAIL ERROR"
+            "WINNER EMAIL ERROR"
         )
+
         print(
             "========================================"
         )
@@ -875,16 +892,19 @@ def send_winner_email(
 
 
         raise HTTPException(
+
             status_code=500,
+
             detail=(
                 "Failed to send winner email: "
                 f"{str(e)}"
             )
+
         )
 
 
 # ============================================================
-# RUN APPLICATION DIRECTLY
+# RUN LOCALLY
 # ============================================================
 
 if __name__ == "__main__":
